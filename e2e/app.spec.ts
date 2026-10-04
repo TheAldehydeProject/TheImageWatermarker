@@ -347,6 +347,60 @@ test('All-in-one produces a ZIP with every result', async ({ page }) => {
   expect(problems).toEqual([]);
 });
 
+test('settings can be exported to a file and uploaded again', async ({ page }) => {
+  const problems = watch(page);
+  // Make some changes worth saving.
+  await page.getByRole('tab', { name: 'Watermark' }).click();
+  await page.getByTestId('blend-mode').selectOption('overlay');
+  await page.getByText('Custom letters').click();
+  await page.getByTestId('letter-o').fill('Q');
+  await page.getByText('More options', { exact: true }).click();
+
+  const [dl] = await Promise.all([
+    page.waitForEvent('download'),
+    page.getByTestId('export-settings').click(),
+  ]);
+  expect(dl.suggestedFilename()).toBe('image-watermarker-settings.json');
+  const settingsPath = (await dl.path())!;
+  const saved = JSON.parse(await readFile(settingsPath, 'utf8'));
+  expect(saved.app).toBe('the-image-watermarker');
+  expect(saved.settings.watermark).toMatchObject({ blendMode: 'overlay', variant: 'custom' });
+  expect(saved.settings.watermark.customLabels.o).toBe('Q');
+  expect(saved.settings.convert.format).toBe('webp');
+  expect(saved.settings.tool).toBeUndefined();
+
+  // Change things again, move to another tab, then upload the file.
+  await page.getByTestId('blend-mode').selectOption('screen');
+  await page.getByRole('tab', { name: 'Convert' }).click();
+  const formats = page.locator('fieldset.formats label');
+  await formats.filter({ hasText: /^\s*AVIF\b/ }).click();
+  await expect(page.locator('fieldset.formats label.active')).toContainText('AVIF');
+  // Playwright stores downloads under random names, so upload it under its real one.
+  await page.getByTestId('settings-input').setInputFiles({
+    name: 'image-watermarker-settings.json',
+    mimeType: 'application/json',
+    buffer: await readFile(settingsPath),
+  });
+  await expect(page.getByTestId('settings-message')).toContainText(
+    'Settings loaded from image-watermarker-settings.json',
+  );
+
+  // Every setting comes back; the open tab stays the same.
+  await expect(page.getByRole('tab', { name: 'Convert' })).toHaveAttribute('aria-selected', 'true');
+  await expect(page.locator('fieldset.formats label.active')).toContainText('WebP');
+  await page.getByRole('tab', { name: 'Watermark' }).click();
+  await expect(page.getByTestId('blend-mode')).toHaveValue('overlay');
+  await expect(page.getByTestId('letter-o')).toHaveValue('Q');
+
+  // A file that isn't a settings file is rejected and changes nothing.
+  await page.getByTestId('settings-input').setInputFiles(join(FIXTURE_DIR, UNSUPPORTED));
+  await expect(page.getByTestId('settings-message')).toContainText(
+    "This isn't a settings file from The Image Watermarker.",
+  );
+  await expect(page.getByTestId('blend-mode')).toHaveValue('overlay');
+  expect(problems).toEqual([]);
+});
+
 test('settings are remembered after a reload', async ({ page }) => {
   await page.getByRole('tab', { name: 'Watermark' }).click();
   await page.getByTestId('blend-mode').selectOption('soft-light');

@@ -9,6 +9,9 @@ import { detectFormat, type InputFormat, type OutputFormat } from './formats';
 import type { RGBAImage } from './image';
 import type { ProcessedFile } from './protocol';
 import {
+  applySettingsInPlace,
+  exportSettings,
+  importSettings,
   jobSpecFor,
   loadSettings,
   saveSettings,
@@ -113,6 +116,18 @@ class AppState {
 
   setTool(tool: Tool): void {
     this.settings.tool = tool;
+  }
+
+  /** A downloadable file with every setting (except the open tab). */
+  settingsFile(): Blob {
+    const text = exportSettings($state.snapshot(this.settings) as AppSettings);
+    return new Blob([text], { type: 'application/json' });
+  }
+
+  /** Applies a settings file. Throws SettingsFileError if it isn't one. */
+  async loadSettingsFile(file: Blob): Promise<void> {
+    const next = importSettings(await file.text(), $state.snapshot(this.settings) as AppSettings);
+    applySettingsInPlace(this.settings, next);
   }
 
   addFiles(list: Iterable<File>): void {

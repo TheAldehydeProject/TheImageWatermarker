@@ -1,9 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import { formatBytes, formatChange, outputFileName, uniqueNames } from '../src/lib/filename';
 import {
+  applySettingsInPlace,
   DEFAULT_SETTINGS,
+  exportSettings,
+  importSettings,
   jobSpecFor,
   normalizeSettings,
+  SettingsFileError,
   specKey,
   watermarkSpecFor,
   type AppSettings,
@@ -122,6 +126,70 @@ describe('watermark preview keys', () => {
     expect(key({ ...DEFAULT_SETTINGS, all: { ...DEFAULT_SETTINGS.all, format: 'png' } })).toBe(
       base,
     );
+  });
+});
+
+describe('settings files', () => {
+  const custom: AppSettings = {
+    ...DEFAULT_SETTINGS,
+    tool: 'convert',
+    convert: { format: 'jxl', lossless: false, quality: 77 },
+    watermark: {
+      ...DEFAULT_SETTINGS.watermark,
+      variant: 'custom',
+      customLabels: { o: 'Q', c: 'Zn', h1: 'X', h2: 'Y' },
+      blendMode: 'overlay',
+      motion: { enabled: true, amount: 60, angle: 200, style: 'blur' },
+    },
+    output: { ...DEFAULT_SETTINGS.output, stripMetadata: false, effort: 'maximum' },
+  };
+
+  it('round-trips every setting except the open tab', () => {
+    const text = exportSettings(custom, new Date('2026-01-02T03:04:05Z'));
+    const file = JSON.parse(text);
+    expect(file).toMatchObject({ app: 'the-image-watermarker', version: 1 });
+    expect(file.exportedAt).toBe('2026-01-02T03:04:05.000Z');
+    expect(file.settings.tool).toBeUndefined();
+    const current: AppSettings = { ...DEFAULT_SETTINGS, tool: 'watermark' };
+    expect(importSettings(text, current)).toEqual({ ...custom, tool: 'watermark' });
+  });
+
+  it('rejects files that are not settings files', () => {
+    const current = DEFAULT_SETTINGS;
+    expect(() => importSettings('not json at all', current)).toThrow(SettingsFileError);
+    expect(() => importSettings('{"hello": 1}', current)).toThrow(/isn't a settings file/);
+    expect(() => importSettings('null', current)).toThrow(SettingsFileError);
+    const newer = JSON.stringify({ app: 'the-image-watermarker', version: 99, settings: {} });
+    expect(() => importSettings(newer, current)).toThrow(/newer version/);
+  });
+
+  it('falls back to defaults for missing or invalid values', () => {
+    const text = JSON.stringify({
+      app: 'the-image-watermarker',
+      version: 1,
+      settings: {
+        watermark: { opacity: 'loud', blendMode: 'sparkle' },
+        convert: { format: 'exe' },
+      },
+    });
+    const s = importSettings(text, DEFAULT_SETTINGS);
+    expect(s.watermark.opacity).toBe(DEFAULT_SETTINGS.watermark.opacity);
+    expect(s.watermark.blendMode).toBe('normal');
+    expect(s.convert.format).toBe('webp');
+    expect(s.compress).toEqual(DEFAULT_SETTINGS.compress);
+  });
+
+  it('applies settings in place, keeping nested objects', () => {
+    const target = structuredClone(DEFAULT_SETTINGS);
+    const { watermark, output } = target;
+    const { motion } = watermark;
+    applySettingsInPlace(target, custom);
+    expect(target).toEqual(custom);
+    expect(target.watermark).toBe(watermark);
+    expect(target.watermark.motion).toBe(motion);
+    expect(target.output).toBe(output);
+    // The source is copied, not shared.
+    expect(target.watermark.customLabels).not.toBe(custom.watermark.customLabels);
   });
 });
 

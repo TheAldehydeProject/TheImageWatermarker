@@ -28,6 +28,8 @@ AVIF, JPEG XL, TIFF, GIF and BMP.
 - Optional resize.
 - Metadata (EXIF and GPS) removal, on by default.
 - Settings are remembered between visits.
+- **Export settings / Upload settings** (under More options): save every setting to a small `.json`
+  file and load it again later or on another device.
 - Light and dark mode, and a layout that works on phones.
 
 ### The watermark

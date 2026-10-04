@@ -184,6 +184,76 @@ export function specKey(spec: JobSpec): string {
   return JSON.stringify(spec);
 }
 
+// ---------------------------------------------------------------------------
+// Settings files (Export settings / Upload settings)
+
+export const SETTINGS_FILE_NAME = 'image-watermarker-settings.json';
+const SETTINGS_FILE_APP = 'the-image-watermarker';
+const SETTINGS_FILE_VERSION = 1;
+
+/** Settings stored in a settings file: everything except which tab is open. */
+export type PortableSettings = Omit<AppSettings, 'tool'>;
+
+export class SettingsFileError extends Error {}
+
+/** The contents of a downloadable settings file. */
+export function exportSettings(s: AppSettings, now = new Date()): string {
+  const settings: Partial<AppSettings> = structuredClone(s);
+  delete settings.tool;
+  return JSON.stringify(
+    {
+      app: SETTINGS_FILE_APP,
+      version: SETTINGS_FILE_VERSION,
+      exportedAt: now.toISOString(),
+      settings: settings as PortableSettings,
+    },
+    null,
+    2,
+  );
+}
+
+/**
+ * Reads a settings file. Missing or invalid values fall back to the defaults;
+ * the open tab is kept as it is.
+ */
+export function importSettings(text: string, current: AppSettings): AppSettings {
+  let data: unknown;
+  try {
+    data = JSON.parse(text);
+  } catch {
+    data = null;
+  }
+  const file = (data && typeof data === 'object' ? data : {}) as Record<string, unknown>;
+  if (file.app !== SETTINGS_FILE_APP) {
+    throw new SettingsFileError("This isn't a settings file from The Image Watermarker.");
+  }
+  if (typeof file.version !== 'number' || file.version > SETTINGS_FILE_VERSION) {
+    throw new SettingsFileError('This settings file was made by a newer version of the site.');
+  }
+  return { ...normalizeSettings(file.settings), tool: current.tool };
+}
+
+/**
+ * Copies settings into an existing settings object without replacing its
+ * nested objects, so parts of the page holding on to them stay connected.
+ */
+export function applySettingsInPlace(target: AppSettings, source: AppSettings): void {
+  const copy = (to: Record<string, unknown>, from: Record<string, unknown>) => {
+    for (const [key, value] of Object.entries(from)) {
+      const existing = to[key];
+      if (value && typeof value === 'object' && existing && typeof existing === 'object') {
+        copy(existing as Record<string, unknown>, value as Record<string, unknown>);
+      } else {
+        to[key] = value;
+      }
+    }
+  };
+  copy(
+    target as unknown as Record<string, unknown>,
+    structuredClone(source) as unknown as Record<string, unknown>,
+  );
+}
+
 const STORAGE_KEY = 'the-image-watermarker:settings:v1';
 
 export function loadSettings(): AppSettings {

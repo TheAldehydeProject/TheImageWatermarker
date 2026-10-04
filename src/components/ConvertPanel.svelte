@@ -8,15 +8,17 @@
   const s = app.settings;
   const info = $derived(OUTPUT_FORMATS[s.convert.format]);
   // FormatPicker can also offer "keep"; here it always holds a real format.
-  let format = $state<OutputFormat | 'keep'>(s.convert.format);
-  $effect(() => {
-    if (format !== 'keep') s.convert.format = format;
-  });
+  // Bound straight to the settings so changes from elsewhere (e.g. an
+  // uploaded settings file) show up immediately.
+  const getFormat = (): OutputFormat | 'keep' => s.convert.format;
+  const setFormat = (v: OutputFormat | 'keep') => {
+    if (v !== 'keep') s.convert.format = v;
+  };
 </script>
 
 <div class="panel">
   <p class="intro">Changes the file type.</p>
-  <FormatPicker bind:value={format} name="convert-format" />
+  <FormatPicker bind:value={getFormat, setFormat} name="convert-format" />
   {#if info.lossless && info.lossy}
     <Toggle
       label="Lossless"
