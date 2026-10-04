@@ -4,6 +4,8 @@ import {
   DEFAULT_SETTINGS,
   jobSpecFor,
   normalizeSettings,
+  specKey,
+  watermarkSpecFor,
   type AppSettings,
 } from '../src/lib/settings';
 
@@ -82,6 +84,44 @@ describe('jobSpecFor', () => {
       },
     });
     expect(on.resize).toEqual({ maxWidth: 100, maxHeight: 0 });
+  });
+});
+
+describe('watermark preview keys', () => {
+  const key = (s: AppSettings) => specKey(watermarkSpecFor(s));
+
+  it('describes the Watermark job whichever tab is open', () => {
+    expect(watermarkSpecFor({ ...DEFAULT_SETTINGS, tool: 'compress' })).toEqual(
+      jobSpecFor({ ...DEFAULT_SETTINGS, tool: 'watermark' }),
+    );
+    expect(key({ ...DEFAULT_SETTINGS, tool: 'convert' })).toBe(key(DEFAULT_SETTINGS));
+  });
+
+  it('changes when a watermark or output setting changes', () => {
+    const base = key(DEFAULT_SETTINGS);
+    const w = DEFAULT_SETTINGS.watermark;
+    expect(key({ ...DEFAULT_SETTINGS, watermark: { ...w, opacity: w.opacity + 1 } })).not.toBe(
+      base,
+    );
+    expect(key({ ...DEFAULT_SETTINGS, watermark: { ...w, blendMode: 'overlay' } })).not.toBe(base);
+    expect(
+      key({ ...DEFAULT_SETTINGS, watermark: { ...w, motion: { ...w.motion, enabled: true } } }),
+    ).not.toBe(base);
+    expect(key({ ...DEFAULT_SETTINGS, watermarkQuality: 80 })).not.toBe(base);
+    expect(
+      key({ ...DEFAULT_SETTINGS, output: { ...DEFAULT_SETTINGS.output, stripMetadata: false } }),
+    ).not.toBe(base);
+  });
+
+  it('ignores settings that do not affect the watermarked file', () => {
+    const base = key(DEFAULT_SETTINGS);
+    expect(
+      key({ ...DEFAULT_SETTINGS, convert: { ...DEFAULT_SETTINGS.convert, format: 'avif' } }),
+    ).toBe(base);
+    expect(key({ ...DEFAULT_SETTINGS, compress: { mode: 'visual', quality: 70 } })).toBe(base);
+    expect(key({ ...DEFAULT_SETTINGS, all: { ...DEFAULT_SETTINGS.all, format: 'png' } })).toBe(
+      base,
+    );
   });
 });
 

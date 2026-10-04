@@ -171,6 +171,19 @@ export function jobSpecFor(s: AppSettings): JobSpec {
   }
 }
 
+/** The job the Watermark tool would run with these settings, whichever tab is open. */
+export function watermarkSpecFor(s: AppSettings): JobSpec {
+  return jobSpecFor({ ...s, tool: 'watermark' });
+}
+
+/**
+ * Identifies the output a job would produce. Two specs with the same key give
+ * the same file, so a preview made with one is still accurate for the other.
+ */
+export function specKey(spec: JobSpec): string {
+  return JSON.stringify(spec);
+}
+
 const STORAGE_KEY = 'the-image-watermarker:settings:v1';
 
 export function loadSettings(): AppSettings {

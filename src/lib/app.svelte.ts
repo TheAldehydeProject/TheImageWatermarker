@@ -8,7 +8,16 @@ import { outputFileName, uniqueNames } from './filename';
 import { detectFormat, type InputFormat, type OutputFormat } from './formats';
 import type { RGBAImage } from './image';
 import type { ProcessedFile } from './protocol';
-import { jobSpecFor, loadSettings, saveSettings, type AppSettings, type Tool } from './settings';
+import {
+  jobSpecFor,
+  loadSettings,
+  saveSettings,
+  specKey,
+  watermarkSpecFor,
+  type AppSettings,
+  type JobSpec,
+  type Tool,
+} from './settings';
 import { WorkerPool } from './workerPool';
 
 export const PREVIEW_SIZE = 1400;
@@ -34,6 +43,14 @@ export interface FileResult {
   blob: Blob;
 }
 
+/** A watermark result generated only for viewing: not downloaded, not in the ZIP. */
+export interface DraftResult extends FileResult {
+  /** specKey() of the settings it was made with, to tell when it is out of date. */
+  key: string;
+}
+
+export type ResultKind = 'result' | 'draft';
+
 export interface FileEntry {
   id: number;
   file: File;
@@ -45,6 +62,9 @@ export interface FileEntry {
   error: string | null;
   previewError: string | null;
   result: FileResult | null;
+  draft: DraftResult | null;
+  draftStatus: 'idle' | 'working' | 'error';
+  draftError: string | null;
 }
 
 let nextId = 1;
@@ -78,6 +98,7 @@ class AppState {
   /** Large previews are kept for a few files only, to limit memory use. */
   private previews = new Map<string, Promise<Preview>>();
   private resultPreviews = new Map<string, Promise<Preview>>();
+  private draftPreviews = new Map<string, Promise<Preview>>();
 
   selected = $derived(this.files.find((f) => f.id === this.selectedId) ?? null);
   doneCount = $derived(this.files.filter((f) => f.result).length);
@@ -108,6 +129,9 @@ class AppState {
         error: null,
         previewError: null,
         result: null,
+        draft: null,
+        draftStatus: 'idle',
+        draftError: null,
       };
       added.push(entry);
     }
@@ -158,16 +182,18 @@ class AppState {
     return p;
   }
 
-  /** The processed result, decoded at the same scale as `preview`. */
-  resultPreview(id: number, maxSize = PREVIEW_SIZE): Promise<Preview> {
+  /** The processed result (or generated preview), decoded at the same scale as `preview`. */
+  resultPreview(id: number, maxSize = PREVIEW_SIZE, kind: ResultKind = 'result'): Promise<Preview> {
     const e = this.entry(id);
-    if (!e?.result) return Promise.reject(new Error('Not processed yet'));
+    const output = kind === 'draft' ? e?.draft : e?.result;
+    if (!output) return Promise.reject(new Error('Not processed yet'));
+    const cache = kind === 'draft' ? this.draftPreviews : this.resultPreviews;
     const key = `${id}:${maxSize}`;
-    const cached = this.resultPreviews.get(key);
+    const cached = cache.get(key);
     if (cached) return cached;
-    const p = this.decode(e.result.blob, e.result.name, maxSize);
-    this.resultPreviews.set(key, p);
-    p.catch(() => this.resultPreviews.delete(key));
+    const p = this.decode(output.blob, output.name, maxSize);
+    cache.set(key, p);
+    p.catch(() => cache.delete(key));
     return p;
   }
 
@@ -187,7 +213,7 @@ class AppState {
 
   /** Drops cached previews of files other than the selected one, keeping a few. */
   private trimPreviews(): void {
-    for (const cache of [this.previews, this.resultPreviews]) {
+    for (const cache of [this.previews, this.resultPreviews, this.draftPreviews]) {
       for (const key of [...cache.keys()]) {
         if (cache.size <= 4) break;
         if (!key.startsWith(`${this.selectedId}:`)) cache.delete(key);
@@ -210,14 +236,59 @@ class AppState {
     const [e] = this.files.splice(i, 1);
     if (e.thumbUrl) URL.revokeObjectURL(e.thumbUrl);
     if (e.result) URL.revokeObjectURL(e.result.url);
+    if (e.draft) URL.revokeObjectURL(e.draft.url);
     this.forget(this.previews, id);
     this.forget(this.resultPreviews, id);
+    this.forget(this.draftPreviews, id);
     if (this.selectedId === id)
       this.selectedId = this.files[Math.min(i, this.files.length - 1)]?.id ?? null;
   }
 
   clear(): void {
     for (const f of [...this.files]) this.remove(f.id);
+  }
+
+  /** The job the Watermark tool would run right now (used to spot stale previews). */
+  watermarkSpec(): JobSpec {
+    return watermarkSpecFor($state.snapshot(this.settings) as AppSettings);
+  }
+
+  private runJob(file: File, spec: JobSpec) {
+    return pool.run(async () => {
+      const bytes = await file.arrayBuffer();
+      return { job: { type: 'process', name: file.name, bytes, spec }, transfer: [bytes] };
+    });
+  }
+
+  /**
+   * Makes the exact watermarked file for one image so it can be inspected,
+   * without downloading it or marking the image as processed.
+   */
+  async generateDraft(id: number): Promise<void> {
+    const e = this.entry(id);
+    if (!e?.format || e.draftStatus === 'working') return;
+    const spec = this.watermarkSpec();
+    e.draftStatus = 'working';
+    e.draftError = null;
+    try {
+      const res = await this.runJob(e.file, spec);
+      if (res.type !== 'process-done') throw new Error('Unexpected reply');
+      const cur = this.entry(id);
+      if (!cur) return;
+      if (cur.draft) URL.revokeObjectURL(cur.draft.url);
+      this.forget(this.draftPreviews, id);
+      cur.draft = {
+        ...this.makeResult(cur, res.file, 'watermark', spec.suffix),
+        key: specKey(spec),
+      };
+      cur.draftStatus = 'idle';
+    } catch (err) {
+      const cur = this.entry(id);
+      if (cur) {
+        cur.draftStatus = 'error';
+        cur.draftError = err instanceof Error ? err.message : String(err);
+      }
+    }
   }
 
   /** Runs the active tool on every file. */
@@ -236,11 +307,7 @@ class AppState {
         e.status = 'processing';
         e.error = null;
         try {
-          const { file } = e;
-          const res = await pool.run(async () => {
-            const bytes = await file.arrayBuffer();
-            return { job: { type: 'process', name: file.name, bytes, spec }, transfer: [bytes] };
-          });
+          const res = await this.runJob(e.file, spec);
           if (res.type !== 'process-done') throw new Error('Unexpected reply');
           this.setResult(t.id, res.file, settings.tool, spec.suffix);
         } catch (err) {
@@ -257,13 +324,9 @@ class AppState {
     this.busy = false;
   }
 
-  private setResult(id: number, f: ProcessedFile, tool: Tool, suffix: string): void {
-    const e = this.entry(id);
-    if (!e) return;
-    if (e.result) URL.revokeObjectURL(e.result.url);
-    this.forget(this.resultPreviews, id);
+  private makeResult(e: FileEntry, f: ProcessedFile, tool: Tool, suffix: string): FileResult {
     const blob = new Blob([f.bytes], { type: f.mime });
-    e.result = {
+    return {
       url: URL.createObjectURL(blob),
       name: outputFileName(e.file.name, f.extension, suffix),
       size: blob.size,
@@ -276,6 +339,14 @@ class AppState {
       tool,
       blob,
     };
+  }
+
+  private setResult(id: number, f: ProcessedFile, tool: Tool, suffix: string): void {
+    const e = this.entry(id);
+    if (!e) return;
+    if (e.result) URL.revokeObjectURL(e.result.url);
+    this.forget(this.resultPreviews, id);
+    e.result = this.makeResult(e, f, tool, suffix);
     e.status = 'done';
   }
 

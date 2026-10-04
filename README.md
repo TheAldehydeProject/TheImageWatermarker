@@ -20,6 +20,9 @@ AVIF, JPEG XL, TIFF, GIF and BMP.
 - Batch processing, with a "Download all" ZIP.
 - Drag and drop, or paste images.
 - Live watermark preview, plus a full-resolution close-up of the watermark.
+- **Generate preview** (Watermark tab): makes the exact watermarked file for the selected image and
+  shows it in the before/after viewer with its size, without exporting it. A note appears if you
+  change settings afterwards.
 - Before/after comparison slider with 100% zoom.
 - Size and percentage saved for every file.
 - Optional resize.

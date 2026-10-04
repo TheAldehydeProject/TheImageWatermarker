@@ -3,9 +3,11 @@
   import { formatBytes, formatChange } from '../lib/filename';
   import { cloneImage, type RGBAImage } from '../lib/image';
   import { OUTPUT_FORMATS } from '../lib/formats';
+  import { specKey } from '../lib/settings';
   import { loadWatermarkFont, renderWatermark } from '../lib/watermarkRender';
 
-  type View = 'live' | 'compare';
+  /** live: instant approximation; compare: processed result; draft: generated preview. */
+  type View = 'live' | 'compare' | 'draft';
   let view = $state<View>('live');
   let zoom = $state<'fit' | 'full'>('fit');
   let split = $state(50);
@@ -23,6 +25,11 @@
     tool === 'watermark' || (tool === 'all' && app.settings.all.watermark),
   );
   const hasResult = $derived(!!file?.result);
+  const canDraft = $derived(tool === 'watermark');
+  // The settings a new preview would use; when they differ from the ones the
+  // current preview was made with, it no longer matches what would be saved.
+  const currentKey = $derived(canDraft ? specKey(app.watermarkSpec()) : '');
+  const draftStale = $derived(!!file?.draft && file.draft.key !== currentKey);
 
   // Switch to the comparison automatically when a result arrives.
   $effect(() => {
@@ -33,6 +40,16 @@
     void file?.id;
     zoom = 'fit';
   });
+  // Generated previews only exist in the Watermark tab.
+  $effect(() => {
+    if (view === 'draft' && !canDraft) view = file?.result ? 'compare' : 'live';
+  });
+
+  function generate() {
+    if (!file) return;
+    view = 'draft';
+    void app.generateDraft(file.id);
+  }
 
   function paint(canvas: HTMLCanvasElement, img: RGBAImage) {
     canvas.width = img.width;
@@ -99,13 +116,14 @@
     })();
   });
 
-  // Before / after comparison.
+  // Before / after comparison (with the processed result or the generated preview).
   $effect(() => {
     const id = file?.id;
-    const result = file?.result;
+    const kind = view === 'draft' ? 'draft' : 'result';
+    const output = kind === 'draft' ? file?.draft : file?.result;
     const [b, a] = [beforeCanvas, afterCanvas];
     const size = zoom === 'full' ? 0 : PREVIEW_SIZE;
-    if (view !== 'compare' || id === undefined || !result || !b || !a) return;
+    if (view === 'live' || id === undefined || !output || !b || !a) return;
     const token = ++renderToken;
     loading = true;
     error = null;
@@ -113,7 +131,7 @@
       try {
         const [before, after] = await Promise.all([
           app.preview(id, size),
-          app.resultPreview(id, size),
+          app.resultPreview(id, size, kind),
         ]);
         if (token !== renderToken) return;
         paint(b, before.image);
@@ -188,6 +206,18 @@
         >
           Before / after
         </button>
+        {#if canDraft}
+          <button
+            role="tab"
+            aria-selected={view === 'draft'}
+            class:on={view === 'draft'}
+            disabled={!file.draft && file.draftStatus !== 'working'}
+            onclick={() => (view = 'draft')}
+            title={file.draft ? '' : 'Press Generate preview first'}
+          >
+            Generated preview
+          </button>
+        {/if}
       </div>
       <div class="seg" aria-label="Zoom">
         <button
@@ -204,6 +234,17 @@
           {view === 'live' ? 'Close-up' : '100%'}
         </button>
       </div>
+      {#if canDraft}
+        <button
+          class="button small primary"
+          data-testid="generate-preview"
+          onclick={generate}
+          disabled={!file.format || !!file.previewError || file.draftStatus === 'working'}
+          title="Make the exact watermarked file for this image, without exporting it"
+        >
+          {file.draftStatus === 'working' ? 'Generating…' : 'Generate preview'}
+        </button>
+      {/if}
       {#if loading}<span class="loading" aria-live="polite">Loading…</span>{/if}
     </div>
 
@@ -219,6 +260,14 @@
     >
       {#if file.previewError}
         <p class="error">{file.previewError}</p>
+      {:else if view === 'draft' && !file.draft}
+        <p class="placeholder">
+          {#if file.draftStatus === 'error'}
+            <span class="error" data-testid="draft-error">{file.draftError}</span>
+          {:else}
+            Generating the exact result…
+          {/if}
+        </p>
       {:else if view === 'live'}
         <canvas
           bind:this={liveCanvas}
@@ -237,7 +286,7 @@
           <canvas bind:this={beforeCanvas} class="img" data-testid="before"></canvas>
           <canvas bind:this={afterCanvas} class="img after" data-testid="after"></canvas>
           <span class="tag left">Before</span>
-          <span class="tag right">After</span>
+          <span class="tag right">{view === 'draft' ? 'Preview' : 'After'}</span>
           <div class="divider" aria-hidden="true"></div>
           <input
             class="split"
@@ -257,7 +306,43 @@
       <p class="caption">Close-up of the watermark, rendered from the full-resolution image.</p>
     {/if}
 
-    {#if file.result}
+    {#if view === 'draft' && file.draft}
+      <div class="result" data-testid="draft-info">
+        <span>
+          <strong>Preview</strong>
+          · {OUTPUT_FORMATS[file.draft.format].label}
+          · {file.draft.width}×{file.draft.height}
+          · {formatBytes(file.file.size)} → {formatBytes(file.draft.size)}
+          ({formatChange(file.file.size, file.draft.size)})
+          {#if file.draft.lossless}<span class="badge">lossless</span>{/if}
+        </span>
+        <a
+          class="button small"
+          href={file.draft.url}
+          download={file.draft.name}
+          data-testid="draft-download">Download this preview</a
+        >
+      </div>
+      {#if draftStale}
+        <p class="stale" data-testid="draft-stale">
+          Settings have changed since this preview was made. Press <strong>Generate preview</strong>
+          to update it.
+        </p>
+      {/if}
+      {#if file.draftStatus === 'error'}
+        <p class="error" data-testid="draft-error">{file.draftError}</p>
+      {/if}
+      {#if !draftStale}
+        <p class="caption">
+          This is exactly the file the Watermark tool would save. Nothing has been exported.
+        </p>
+      {/if}
+      {#if file.draft.notes.length}
+        <ul class="notes">
+          {#each file.draft.notes as n, i (i)}<li>{n}</li>{/each}
+        </ul>
+      {/if}
+    {:else if view !== 'draft' && file.result}
       <div class="result" data-testid="result-info">
         <span>
           <strong>{OUTPUT_FORMATS[file.result.format].label}</strong>
@@ -450,5 +535,15 @@
   }
   .error {
     color: var(--danger);
+  }
+  .placeholder {
+    color: var(--muted);
+  }
+  .stale {
+    margin: 0;
+    padding: 8px 12px;
+    border-radius: 10px;
+    background: var(--accent-soft);
+    font-size: 0.9rem;
   }
 </style>

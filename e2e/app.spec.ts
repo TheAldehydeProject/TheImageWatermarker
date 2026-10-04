@@ -279,6 +279,57 @@ test('Watermark keeps lossless files lossless and handles every format', async (
   expect(problems).toEqual([]);
 });
 
+test('Watermark: Generate preview shows the exact result without exporting', async ({ page }) => {
+  const problems = watch(page);
+  const downloads: string[] = [];
+  page.on('download', (d) => downloads.push(d.suggestedFilename()));
+  await page.getByRole('tab', { name: 'Watermark' }).click();
+  await page.getByTestId('file-input').setInputFiles(join(FIXTURE_DIR, 'camera.jpg'));
+  await expect(row(page, 'camera.jpg').locator('img')).toBeVisible();
+
+  // Only offered in the Watermark tab.
+  await page.getByRole('tab', { name: 'Compress' }).click();
+  await expect(page.getByTestId('generate-preview')).toHaveCount(0);
+  await page.getByRole('tab', { name: 'Watermark' }).click();
+
+  await page.getByTestId('generate-preview').click();
+  const info = page.getByTestId('draft-info');
+  await expect(info).toContainText('JPG');
+  await expect(info).toContainText('640×480');
+  await expect(page.getByTestId('draft-stale')).toHaveCount(0);
+
+  // The before/after viewer shows the watermark in the bottom-right corner.
+  await expect
+    .poll(() => page.getByTestId('after').evaluate((c: HTMLCanvasElement) => c.width))
+    .toBe(640);
+  const corner = (id: string) => canvasRegion(page, id, 0.75, 0.75, 0.25, 0.25);
+  await expect.poll(async () => differs(await corner('after'), await corner('before'))).toBe(true);
+
+  // Nothing was exported or marked as processed.
+  await expect(row(page, 'camera.jpg')).toHaveAttribute('data-status', 'idle');
+  await expect(page.getByTestId('zip')).toBeDisabled();
+  expect(downloads).toEqual([]);
+
+  // Changing a setting marks the preview as out of date; generating again updates it.
+  await page.getByTestId('blend-mode').selectOption('multiply');
+  await expect(page.getByTestId('draft-stale')).toBeVisible();
+  await page.getByTestId('generate-preview').click();
+  await expect(page.getByTestId('draft-stale')).toHaveCount(0);
+
+  // It can be downloaded if wanted, and it is byte-for-byte what Watermark saves.
+  const link = page.getByTestId('draft-download');
+  await expect(link).toHaveAttribute('download', 'camera-watermarked.jpg');
+  const [dl] = await Promise.all([page.waitForEvent('download'), link.click()]);
+  const previewBytes = new Uint8Array(await readFile((await dl.path())!));
+  await expect(row(page, 'camera.jpg')).toHaveAttribute('data-status', 'idle');
+  await page.getByTestId('process').click();
+  await expect(row(page, 'camera.jpg')).toHaveAttribute('data-status', 'done');
+  const saved = await download(page, 'camera.jpg');
+  expect(saved.name).toBe('camera-watermarked.jpg');
+  expect(previewBytes).toEqual(saved.bytes);
+  expect(problems).toEqual([]);
+});
+
 test('All-in-one produces a ZIP with every result', async ({ page }) => {
   const problems = watch(page);
   await page.getByRole('tab', { name: 'All-in-one' }).click();
