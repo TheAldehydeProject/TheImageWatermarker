@@ -3,12 +3,14 @@ import { formatBytes, formatChange, outputFileName, uniqueNames } from '../src/l
 import {
   applySettingsInPlace,
   DEFAULT_SETTINGS,
+  DEFAULT_TARGET,
   exportSettings,
   importSettings,
   jobSpecFor,
   normalizeSettings,
   SettingsFileError,
   specKey,
+  targetBytes,
   watermarkSpecFor,
   type AppSettings,
 } from '../src/lib/settings';
@@ -122,7 +124,9 @@ describe('watermark preview keys', () => {
     expect(
       key({ ...DEFAULT_SETTINGS, convert: { ...DEFAULT_SETTINGS.convert, format: 'avif' } }),
     ).toBe(base);
-    expect(key({ ...DEFAULT_SETTINGS, compress: { mode: 'visual', quality: 70 } })).toBe(base);
+    expect(
+      key({ ...DEFAULT_SETTINGS, compress: { ...DEFAULT_SETTINGS.compress, mode: 'visual' } }),
+    ).toBe(base);
     expect(key({ ...DEFAULT_SETTINGS, all: { ...DEFAULT_SETTINGS.all, format: 'png' } })).toBe(
       base,
     );
@@ -219,5 +223,47 @@ describe('file names', () => {
     expect(formatChange(1000, 750)).toBe('-25%');
     expect(formatChange(1000, 1100)).toBe('+10%');
     expect(formatChange(1000, 995)).toBe('-0.5%');
+  });
+});
+
+describe('target size', () => {
+  it('converts KB and MB the same way the page shows sizes (1024-based)', () => {
+    expect(targetBytes({ value: 300, unit: 'KB' })).toBe(300 * 1024);
+    expect(targetBytes({ value: 1.5, unit: 'MB' })).toBe(1.5 * 1024 * 1024);
+    // Never asks for less than 1 KB; an empty or broken value uses the default.
+    expect(targetBytes({ value: 0.2, unit: 'KB' })).toBe(1024);
+    expect(targetBytes({ value: Number.NaN, unit: 'KB' })).toBe(DEFAULT_TARGET.value * 1024);
+  });
+
+  it('is used by Compress and All-in-one only in target mode', () => {
+    const target = { value: 250, unit: 'KB' as const };
+    const compress = jobSpecFor({
+      ...DEFAULT_SETTINGS,
+      tool: 'compress',
+      compress: { ...DEFAULT_SETTINGS.compress, mode: 'target', target },
+    });
+    expect(compress).toMatchObject({ targetBytes: 250 * 1024, lossless: false, neverBigger: true });
+    const all = jobSpecFor({
+      ...DEFAULT_SETTINGS,
+      tool: 'all',
+      all: { ...DEFAULT_SETTINGS.all, mode: 'target', target },
+    });
+    expect(all).toMatchObject({ targetBytes: 250 * 1024, lossless: false });
+    for (const tool of ['compress', 'convert', 'watermark', 'all'] as const) {
+      expect(jobSpecFor({ ...DEFAULT_SETTINGS, tool }).targetBytes).toBeNull();
+    }
+  });
+
+  it('is checked when loaded', () => {
+    const load = (target: unknown) =>
+      normalizeSettings({ compress: { mode: 'target', target } }).compress;
+    expect(load({ value: 2, unit: 'MB' })).toEqual({
+      mode: 'target',
+      quality: DEFAULT_SETTINGS.compress.quality,
+      target: { value: 2, unit: 'MB' },
+    });
+    expect(load({ value: -5, unit: 'GB' }).target).toEqual({ value: 500, unit: 'KB' });
+    expect(load('300kb').target).toEqual(DEFAULT_TARGET);
+    expect(load({ value: 1e9, unit: 'KB' }).target.value).toBe(100_000);
   });
 });

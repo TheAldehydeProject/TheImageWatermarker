@@ -3,6 +3,7 @@
   import CompressPanel from './components/CompressPanel.svelte';
   import ConvertPanel from './components/ConvertPanel.svelte';
   import DropZone from './components/DropZone.svelte';
+  import EstimateSize from './components/EstimateSize.svelte';
   import FileList from './components/FileList.svelte';
   import MoleculeIcon from './components/MoleculeIcon.svelte';
   import OutputOptions from './components/OutputOptions.svelte';
@@ -19,6 +20,7 @@
   ];
   const active = $derived(tools.find((t) => t.id === app.settings.tool)!);
   const usable = $derived(app.files.filter((f) => f.format).length);
+  const percent = $derived(Math.floor(app.batchProgress * 100));
 
   let zipUrl: string | null = null;
   async function downloadZip() {
@@ -110,6 +112,10 @@
     {/if}
     <OutputOptions />
     <div class="actions">
+      {#if app.settings.tool !== 'watermark' && app.selected}
+        <!-- The Watermark tab has Generate preview, which shows the size too. -->
+        <EstimateSize />
+      {/if}
       <button
         class="button primary"
         disabled={!usable || app.busy}
@@ -130,6 +136,23 @@
       >
         Download all (ZIP)
       </button>
+      {#if app.busy}
+        <div class="batch" data-testid="batch-progress">
+          <div
+            class="bar"
+            role="progressbar"
+            aria-label="Progress"
+            aria-valuemin={0}
+            aria-valuemax={100}
+            aria-valuenow={percent}
+          >
+            <span style:width={`${app.batchProgress * 100}%`}></span>
+          </div>
+          <span class="batch-text"
+            >{app.progress.done} of {app.progress.total} done · {percent}%</span
+          >
+        </div>
+      {/if}
     </div>
   </div>
 </main>

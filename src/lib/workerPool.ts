@@ -1,6 +1,7 @@
 import type { WorkerJob, WorkerRequest, WorkerResponse } from './protocol';
 
-type Success = Exclude<WorkerResponse, { type: 'error' }>;
+type Success = Exclude<WorkerResponse, { type: 'error' | 'progress' }>;
+export type ProgressMessage = Extract<WorkerResponse, { type: 'progress' }>;
 
 /** Builds a job only once a worker is free, so large files aren't all read into memory at once. */
 export type PrepareJob = () => Promise<{ job: WorkerJob; transfer: Transferable[] }>;
@@ -9,6 +10,7 @@ interface Pending {
   prepare: PrepareJob;
   resolve: (r: Success) => void;
   reject: (e: Error) => void;
+  onProgress?: (p: ProgressMessage) => void;
 }
 
 /**
@@ -27,9 +29,10 @@ export class WorkerPool {
     private readonly size: number,
   ) {}
 
-  run(prepare: PrepareJob): Promise<Success> {
+  /** `onProgress` receives the worker's step-by-step reports while the job runs. */
+  run(prepare: PrepareJob, onProgress?: (p: ProgressMessage) => void): Promise<Success> {
     return new Promise((resolve, reject) => {
-      this.queue.push({ prepare, resolve, reject });
+      this.queue.push({ prepare, resolve, reject, onProgress });
       this.pump();
     });
   }
@@ -89,6 +92,10 @@ export class WorkerPool {
   private finish(worker: Worker, msg: WorkerResponse): void {
     const entry = this.running.get(msg.id);
     if (!entry) return;
+    if (msg.type === 'progress') {
+      entry.pending.onProgress?.(msg);
+      return;
+    }
     this.running.delete(msg.id);
     if (msg.type === 'error') entry.pending.reject(new Error(msg.message));
     else entry.pending.resolve(msg);

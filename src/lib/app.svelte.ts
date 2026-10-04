@@ -7,6 +7,7 @@ import ProcessWorker from '../workers/process.worker?worker';
 import { outputFileName, uniqueNames } from './filename';
 import { detectFormat, type InputFormat, type OutputFormat } from './formats';
 import type { RGBAImage } from './image';
+import { batchFraction, type FileStep } from './progress';
 import type { ProcessedFile } from './protocol';
 import {
   applySettingsInPlace,
@@ -54,6 +55,15 @@ export interface DraftResult extends FileResult {
 
 export type ResultKind = 'result' | 'draft';
 
+/** The exact output for one image with a given set of settings, made to show its size. */
+export interface Estimate {
+  /** specKey() of the job it was made with. */
+  key: string;
+  file: ProcessedFile;
+  tool: Tool;
+  suffix: string;
+}
+
 export interface FileEntry {
   id: number;
   file: File;
@@ -62,12 +72,21 @@ export interface FileEntry {
   width: number | null;
   height: number | null;
   status: 'idle' | 'processing' | 'done' | 'error';
+  /** While processing: the step it has reached, and the try number when fitting a target size. */
+  step: FileStep | null;
+  attempt: number;
   error: string | null;
   previewError: string | null;
   result: FileResult | null;
   draft: DraftResult | null;
   draftStatus: 'idle' | 'working' | 'error';
   draftError: string | null;
+  estimate: Estimate | null;
+  estimateStatus: 'idle' | 'working' | 'error';
+  estimateError: string | null;
+  /** The step an estimate in progress has reached. */
+  estimateStep: FileStep | null;
+  estimateAttempt: number;
 }
 
 let nextId = 1;
@@ -105,6 +124,18 @@ class AppState {
 
   selected = $derived(this.files.find((f) => f.id === this.selectedId) ?? null);
   doneCount = $derived(this.files.filter((f) => f.result).length);
+  /** specKey() of the job the open tool would run now, to tell when an estimate is out of date. */
+  currentKey = $derived(specKey(jobSpecFor($state.snapshot(this.settings) as AppSettings)));
+  /** Share of the current batch that is finished (0–1), including files part-way through. */
+  batchProgress = $derived(
+    batchFraction(
+      this.progress.done,
+      this.progress.total,
+      this.files.flatMap((f) =>
+        f.status === 'processing' && f.step ? [{ step: f.step, attempt: f.attempt }] : [],
+      ),
+    ),
+  );
 
   constructor() {
     $effect.root(() => {
@@ -141,12 +172,19 @@ class AppState {
         width: null,
         height: null,
         status: 'idle',
+        step: null,
+        attempt: 0,
         error: null,
         previewError: null,
         result: null,
         draft: null,
         draftStatus: 'idle',
         draftError: null,
+        estimate: null,
+        estimateStatus: 'idle',
+        estimateError: null,
+        estimateStep: null,
+        estimateAttempt: 0,
       };
       added.push(entry);
     }
@@ -268,11 +306,16 @@ class AppState {
     return watermarkSpecFor($state.snapshot(this.settings) as AppSettings);
   }
 
-  private runJob(file: File, spec: JobSpec) {
-    return pool.run(async () => {
-      const bytes = await file.arrayBuffer();
-      return { job: { type: 'process', name: file.name, bytes, spec }, transfer: [bytes] };
-    });
+  /** `onStep` hears when the job starts reading the file and each step after that. */
+  private runJob(file: File, spec: JobSpec, onStep?: (step: FileStep, attempt: number) => void) {
+    return pool.run(
+      async () => {
+        onStep?.('reading', 0);
+        const bytes = await file.arrayBuffer();
+        return { job: { type: 'process', name: file.name, bytes, spec }, transfer: [bytes] };
+      },
+      (p) => onStep?.(p.step, p.attempt ?? 0),
+    );
   }
 
   /**
@@ -306,6 +349,48 @@ class AppState {
     }
   }
 
+  /**
+   * Makes the file the open tool would save for one image, to show its exact
+   * size without downloading it. Processing reuses it if nothing has changed.
+   */
+  async estimate(id: number): Promise<void> {
+    const e = this.entry(id);
+    if (!e?.format || e.estimateStatus === 'working') return;
+    const settings = $state.snapshot(this.settings) as AppSettings;
+    const spec = jobSpecFor(settings);
+    e.estimateStatus = 'working';
+    e.estimateError = null;
+    e.estimateStep = 'queued';
+    e.estimateAttempt = 0;
+    try {
+      const res = await this.runJob(e.file, spec, (step, attempt) => {
+        const cur = this.entry(id);
+        if (cur?.estimateStatus !== 'working') return;
+        cur.estimateStep = step;
+        cur.estimateAttempt = attempt;
+      });
+      if (res.type !== 'process-done') throw new Error('Unexpected reply');
+      const cur = this.entry(id);
+      if (!cur) return;
+      cur.estimate = {
+        key: specKey(spec),
+        file: res.file,
+        tool: settings.tool,
+        suffix: spec.suffix,
+      };
+      cur.estimateStatus = 'idle';
+    } catch (err) {
+      const cur = this.entry(id);
+      if (cur) {
+        cur.estimateStatus = 'error';
+        cur.estimateError = err instanceof Error ? err.message : String(err);
+      }
+    } finally {
+      const cur = this.entry(id);
+      if (cur) cur.estimateStep = null;
+    }
+  }
+
   /** Runs the active tool on every file. */
   async processAll(): Promise<void> {
     if (this.busy) return;
@@ -313,6 +398,7 @@ class AppState {
     if (!targets.length) return;
     const settings = $state.snapshot(this.settings) as AppSettings;
     const spec = jobSpecFor(settings);
+    const key = specKey(spec);
     this.busy = true;
     this.progress = { done: 0, total: targets.length };
     await Promise.all(
@@ -320,9 +406,21 @@ class AppState {
         const e = this.entry(t.id);
         if (!e) return;
         e.status = 'processing';
+        e.step = 'queued';
+        e.attempt = 0;
         e.error = null;
         try {
-          const res = await this.runJob(e.file, spec);
+          // An estimate made with the same settings is already the exact file.
+          if (e.estimate?.key === key) {
+            this.setResult(t.id, e.estimate.file, settings.tool, spec.suffix);
+            return;
+          }
+          const res = await this.runJob(e.file, spec, (step, attempt) => {
+            const cur = this.entry(t.id);
+            if (cur?.status !== 'processing') return;
+            cur.step = step;
+            cur.attempt = attempt;
+          });
           if (res.type !== 'process-done') throw new Error('Unexpected reply');
           this.setResult(t.id, res.file, settings.tool, spec.suffix);
         } catch (err) {
@@ -332,6 +430,8 @@ class AppState {
             cur.error = err instanceof Error ? err.message : String(err);
           }
         } finally {
+          const cur = this.entry(t.id);
+          if (cur) cur.step = null;
           this.progress.done++;
         }
       }),

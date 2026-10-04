@@ -27,6 +27,7 @@ scope.onmessage = async (event: MessageEvent<WorkerRequest>) => {
     if (req.type === 'process') {
       const r = await processImage(new Uint8Array(req.bytes), req.name, req.spec, {
         watermark: renderWatermark,
+        progress: (step, attempt) => reply({ type: 'progress', id: req.id, step, attempt }),
       });
       const bytes = ownBuffer(r.bytes);
       reply(

@@ -2,12 +2,26 @@ import { OUTPUT_FORMATS, type OutputFormat } from './formats';
 import { normalizeWatermark, DEFAULT_WATERMARK, type WatermarkSettings } from './watermark';
 
 export type Tool = 'compress' | 'convert' | 'watermark' | 'all';
-export type CompressionMode = 'lossless' | 'visual';
+/** 'target' aims for a file size instead of a fixed quality. */
+export type CompressionMode = 'lossless' | 'visual' | 'target';
 export type Effort = 'balanced' | 'maximum';
+
+export interface TargetSize {
+  value: number;
+  unit: 'KB' | 'MB';
+}
+
+/** A target size in bytes. KB and MB are 1024-based, as the sizes shown on the page are. */
+export function targetBytes(t: TargetSize): number {
+  const value = Number.isFinite(t.value) && t.value > 0 ? t.value : DEFAULT_TARGET.value;
+  return Math.max(1024, Math.round(value * (t.unit === 'MB' ? 1024 * 1024 : 1024)));
+}
+
+export const DEFAULT_TARGET: TargetSize = { value: 500, unit: 'KB' };
 
 export interface AppSettings {
   tool: Tool;
-  compress: { mode: CompressionMode; quality: number };
+  compress: { mode: CompressionMode; quality: number; target: TargetSize };
   convert: { format: OutputFormat; lossless: boolean; quality: number };
   watermark: WatermarkSettings;
   /** Quality used when a watermarked photo has to be re-saved in a lossy format. */
@@ -17,6 +31,7 @@ export interface AppSettings {
     format: 'keep' | OutputFormat;
     mode: CompressionMode;
     quality: number;
+    target: TargetSize;
   };
   output: {
     resize: { enabled: boolean; maxWidth: number; maxHeight: number };
@@ -29,11 +44,11 @@ export interface AppSettings {
 
 export const DEFAULT_SETTINGS: AppSettings = {
   tool: 'compress',
-  compress: { mode: 'lossless', quality: 90 },
+  compress: { mode: 'lossless', quality: 90, target: DEFAULT_TARGET },
   convert: { format: 'webp', lossless: true, quality: 90 },
   watermark: DEFAULT_WATERMARK,
   watermarkQuality: 92,
-  all: { watermark: true, format: 'webp', mode: 'lossless', quality: 90 },
+  all: { watermark: true, format: 'webp', mode: 'lossless', quality: 90, target: DEFAULT_TARGET },
   output: {
     resize: { enabled: false, maxWidth: 2560, maxHeight: 2560 },
     stripMetadata: true,
@@ -49,9 +64,17 @@ const num = (v: unknown, min: number, max: number, fallback: number) =>
     ? Math.min(max, Math.max(min, Math.round(v)))
     : fallback;
 const mode = (v: unknown, fallback: CompressionMode): CompressionMode =>
-  v === 'lossless' || v === 'visual' ? v : fallback;
+  v === 'lossless' || v === 'visual' || v === 'target' ? v : fallback;
 const obj = (v: unknown): Record<string, unknown> =>
   v && typeof v === 'object' ? (v as Record<string, unknown>) : {};
+function target(v: unknown): TargetSize {
+  const t = obj(v);
+  const value =
+    typeof t.value === 'number' && Number.isFinite(t.value) && t.value > 0
+      ? Math.min(100_000, Math.round(t.value * 100) / 100)
+      : DEFAULT_TARGET.value;
+  return { value: Math.max(0.01, value), unit: t.unit === 'MB' ? 'MB' : 'KB' };
+}
 
 /** Validates settings loaded from storage, filling any gaps with defaults. */
 export function normalizeSettings(input: unknown): AppSettings {
@@ -69,6 +92,7 @@ export function normalizeSettings(input: unknown): AppSettings {
     compress: {
       mode: mode(compress.mode, d.compress.mode),
       quality: num(compress.quality, 1, 100, d.compress.quality),
+      target: target(compress.target),
     },
     convert: {
       format: isFormat(convert.format) ? convert.format : d.convert.format,
@@ -82,6 +106,7 @@ export function normalizeSettings(input: unknown): AppSettings {
       format: all.format === 'keep' || isFormat(all.format) ? all.format : d.all.format,
       mode: mode(all.mode, d.all.mode),
       quality: num(all.quality, 1, 100, d.all.quality),
+      target: target(all.target),
     },
     output: {
       resize: {
@@ -114,6 +139,8 @@ export interface JobSpec {
   effort: Effort;
   /** Never hand back a file bigger than the original (Compress). */
   neverBigger: boolean;
+  /** When set, find the highest quality whose file fits in this many bytes. */
+  targetBytes: number | null;
   /** Added to the file name, e.g. "-compressed". */
   suffix: string;
 }
@@ -126,6 +153,7 @@ export function jobSpecFor(s: AppSettings): JobSpec {
     stripMetadata: s.output.stripMetadata,
     fallbackFormat: s.output.fallbackFormat,
     effort: s.output.effort,
+    targetBytes: null,
   };
   switch (s.tool) {
     case 'compress':
@@ -136,6 +164,7 @@ export function jobSpecFor(s: AppSettings): JobSpec {
         quality: s.compress.quality,
         watermark: null,
         neverBigger: true,
+        targetBytes: s.compress.mode === 'target' ? targetBytes(s.compress.target) : null,
         suffix: '-compressed',
       };
     case 'convert':
@@ -166,6 +195,7 @@ export function jobSpecFor(s: AppSettings): JobSpec {
         quality: s.all.quality,
         watermark: s.all.watermark ? s.watermark : null,
         neverBigger: false,
+        targetBytes: s.all.mode === 'target' ? targetBytes(s.all.target) : null,
         suffix: '-edited',
       };
   }

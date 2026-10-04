@@ -3,6 +3,7 @@
   import { OUTPUT_FORMATS } from '../lib/formats';
   import Segmented from './Segmented.svelte';
   import Slider from './Slider.svelte';
+  import TargetSize from './TargetSize.svelte';
 
   const s = app.settings;
 </script>
@@ -24,8 +25,20 @@
         label: 'Visually lossless',
         hint: 'Re-saves at a high quality. Much smaller, with differences you cannot see at normal viewing sizes.',
       },
+      {
+        value: 'target',
+        label: 'Target size',
+        hint: 'Aims for a file size you choose, at the best quality that fits.',
+      },
     ]}
   />
+  {#if s.compress.mode === 'target'}
+    <TargetSize id="compress-target" bind:value={s.compress.target} />
+    <p class="note">
+      Compress keeps each file's format. For the smallest photos, use All-in-one and choose AVIF: at
+      the same visual quality it is about 30% smaller than JPG and 25% smaller than WebP.
+    </p>
+  {/if}
   {#if s.compress.mode === 'visual'}
     <Slider
       id="compress-quality"
@@ -55,6 +68,10 @@
         <strong>AVIF / JPEG XL</strong>: already compressed; use visually lossless to shrink them.
       </li>
       <li><strong>TIFF</strong>: re-saved with lossless Deflate compression.</li>
+      <li>
+        <strong>Target size</strong>: JPG, WebP, AVIF and JPEG XL get the highest quality that fits;
+        PNG stays lossless if it fits, otherwise drops to 256 colours; TIFF can only be resized.
+      </li>
       <li>
         <strong>RAW, HEIC, GIF, BMP</strong>: can't be written back, so they're saved as {OUTPUT_FORMATS[
           s.output.fallbackFormat

@@ -17,7 +17,12 @@
   let liveCanvas = $state<HTMLCanvasElement>();
   let beforeCanvas = $state<HTMLCanvasElement>();
   let afterCanvas = $state<HTMLCanvasElement>();
-  let display = $state({ w: 0, h: 0 });
+  /**
+   * What the canvases hold right now. The on-screen size follows this rather
+   * than the Fit / Close-up buttons, so while a new image is still loading the
+   * old one keeps its size and shape instead of jumping or stretching.
+   */
+  let display = $state({ w: 0, h: 0, zoomed: false });
 
   const file = $derived(app.selected);
   const tool = $derived(app.settings.tool);
@@ -45,10 +50,15 @@
     if (view === 'draft' && !canDraft) view = file?.result ? 'compare' : 'live';
   });
 
-  function generate() {
+  /**
+   * Makes the preview, keeping the current picture on screen until it is
+   * ready so the viewer doesn't empty out and jump in the meantime.
+   */
+  async function generate() {
     if (!file) return;
-    view = 'draft';
-    void app.generateDraft(file.id);
+    const id = file.id;
+    await app.generateDraft(id);
+    if (app.selected?.id === id && app.selected.draft && canDraft) view = 'draft';
   }
 
   function paint(canvas: HTMLCanvasElement, img: RGBAImage) {
@@ -107,7 +117,7 @@
         }
         if (token !== renderToken) return;
         paint(canvas, img);
-        display = { w: img.width, h: img.height };
+        display = { w: img.width, h: img.height, zoomed: closeUp };
       } catch (err) {
         if (token === renderToken) error = err instanceof Error ? err.message : String(err);
       } finally {
@@ -122,7 +132,8 @@
     const kind = view === 'draft' ? 'draft' : 'result';
     const output = kind === 'draft' ? file?.draft : file?.result;
     const [b, a] = [beforeCanvas, afterCanvas];
-    const size = zoom === 'full' ? 0 : PREVIEW_SIZE;
+    const full = zoom === 'full';
+    const size = full ? 0 : PREVIEW_SIZE;
     if (view === 'live' || id === undefined || !output || !b || !a) return;
     const token = ++renderToken;
     loading = true;
@@ -136,7 +147,7 @@
         if (token !== renderToken) return;
         paint(b, before.image);
         paint(a, after.image);
-        display = { w: before.image.width, h: before.image.height };
+        display = { w: before.image.width, h: before.image.height, zoomed: full };
       } catch (err) {
         if (token === renderToken) error = err instanceof Error ? err.message : String(err);
       } finally {
@@ -148,19 +159,21 @@
   // Start loading the font early so the first live preview is quick.
   void loadWatermarkFont();
 
+  // Fit never enlarges, so small images look the same size here as in the live view.
   const compareWidth = $derived(
-    zoom === 'full'
+    display.zoomed
       ? `${display.w}px`
       : display.h
-        ? `min(100%, calc((68vh - 20px) * ${display.w / display.h}))`
+        ? `min(100%, ${display.w}px, calc((68vh - 20px) * ${display.w / display.h}))`
         : '100%',
   );
+  const generating = $derived(canDraft && file?.draftStatus === 'working');
 
   // Drag-to-pan when zoomed in.
   let scroller = $state<HTMLDivElement>();
   let drag: { x: number; y: number; left: number; top: number } | null = null;
   function onPointerDown(e: PointerEvent) {
-    if (zoom !== 'full' || !scroller || (e.target as HTMLElement).closest('input')) return;
+    if (!display.zoomed || !scroller || (e.target as HTMLElement).closest('input')) return;
     drag = { x: e.clientX, y: e.clientY, left: scroller.scrollLeft, top: scroller.scrollTop };
     scroller.setPointerCapture(e.pointerId);
   }
@@ -236,74 +249,89 @@
       </div>
       {#if canDraft}
         <button
-          class="button small primary"
+          class="button small primary generate"
           data-testid="generate-preview"
           onclick={generate}
           disabled={!file.format || !!file.previewError || file.draftStatus === 'working'}
           title="Make the exact watermarked file for this image, without exporting it"
         >
-          {file.draftStatus === 'working' ? 'Generating…' : 'Generate preview'}
+          <!-- Both labels take up space, so the button keeps one width and the toolbar doesn't reflow. -->
+          <span class="label" class:hidden={file.draftStatus === 'working'}>Generate preview</span>
+          <span class="label" class:hidden={file.draftStatus !== 'working'}>Generating…</span>
         </button>
       {/if}
-      {#if loading}<span class="loading" aria-live="polite">Loading…</span>{/if}
     </div>
 
-    <div
-      class="stage"
-      class:zoomed={zoom === 'full' && view === 'compare'}
-      bind:this={scroller}
-      onpointerdown={onPointerDown}
-      onpointermove={onPointerMove}
-      onpointerup={onPointerUp}
-      onpointercancel={onPointerUp}
-      role="presentation"
-    >
-      {#if file.previewError}
-        <p class="error">{file.previewError}</p>
-      {:else if view === 'draft' && !file.draft}
-        <p class="placeholder">
-          {#if file.draftStatus === 'error'}
-            <span class="error" data-testid="draft-error">{file.draftError}</span>
-          {:else}
-            Generating the exact result…
-          {/if}
-        </p>
-      {:else if view === 'live'}
-        <canvas
-          bind:this={liveCanvas}
-          class="img"
-          class:closeup={zoom === 'full'}
-          data-testid="live-preview"
-          style:width={zoom === 'full' ? `min(100%, ${display.w * 4}px)` : null}
-        ></canvas>
-      {:else}
-        <div
-          class="compare"
-          style:--split={`${split}%`}
-          style:width={compareWidth}
-          style:aspect-ratio={display.h ? `${display.w} / ${display.h}` : null}
-        >
-          <canvas bind:this={beforeCanvas} class="img" data-testid="before"></canvas>
-          <canvas bind:this={afterCanvas} class="img after" data-testid="after"></canvas>
-          <span class="tag left">Before</span>
-          <span class="tag right">{view === 'draft' ? 'Preview' : 'After'}</span>
-          <div class="divider" aria-hidden="true"></div>
-          <input
-            class="split"
-            type="range"
-            min="0"
-            max="100"
-            step="0.5"
-            bind:value={split}
-            aria-label="Move the before/after divider"
-          />
-        </div>
-      {/if}
-      {#if error}<p class="error">{error}</p>{/if}
+    <div class="stage-wrap">
+      <div
+        class="stage"
+        data-testid="preview-stage"
+        class:zoomed={display.zoomed && view === 'compare'}
+        bind:this={scroller}
+        onpointerdown={onPointerDown}
+        onpointermove={onPointerMove}
+        onpointerup={onPointerUp}
+        onpointercancel={onPointerUp}
+        role="presentation"
+      >
+        {#if file.previewError}
+          <p class="error">{file.previewError}</p>
+        {:else if view === 'draft' && !file.draft}
+          <p class="placeholder">
+            {#if file.draftStatus === 'error'}
+              <span class="error" data-testid="draft-error">{file.draftError}</span>
+            {:else}
+              Generating the exact result…
+            {/if}
+          </p>
+        {:else if view === 'live'}
+          <canvas
+            bind:this={liveCanvas}
+            class="img"
+            class:closeup={display.zoomed}
+            data-testid="live-preview"
+            style:width={display.zoomed ? `min(100%, ${display.w * 4}px)` : null}
+          ></canvas>
+        {:else}
+          <div
+            class="compare"
+            style:--split={`${split}%`}
+            style:width={compareWidth}
+            style:aspect-ratio={display.h ? `${display.w} / ${display.h}` : null}
+          >
+            <canvas bind:this={beforeCanvas} class="img" data-testid="before"></canvas>
+            <canvas bind:this={afterCanvas} class="img after" data-testid="after"></canvas>
+            <span class="tag left">Before</span>
+            <span class="tag right">{view === 'draft' ? 'Preview' : 'After'}</span>
+            <div class="divider" aria-hidden="true"></div>
+            <input
+              class="split"
+              type="range"
+              min="0"
+              max="100"
+              step="0.5"
+              bind:value={split}
+              aria-label="Move the before/after divider"
+            />
+          </div>
+        {/if}
+        {#if error}<p class="error">{error}</p>{/if}
+      </div>
+      <!-- Drawn over the picture, so showing it never moves anything. -->
+      <span
+        class="loading"
+        class:on={loading || generating}
+        role="status"
+        data-testid="preview-loading"
+        >{generating ? 'Generating preview…' : loading ? 'Loading…' : ''}</span
+      >
     </div>
 
     {#if view === 'live' && zoom === 'full'}
       <p class="caption">Close-up of the watermark, rendered from the full-resolution image.</p>
+    {/if}
+    {#if canDraft && view !== 'draft' && file.draftStatus === 'error'}
+      <p class="error" data-testid="draft-error">{file.draftError}</p>
     {/if}
 
     {#if view === 'draft' && file.draft}
@@ -416,9 +444,43 @@
     opacity: 0.45;
     cursor: not-allowed;
   }
+  .generate {
+    display: inline-grid;
+    justify-items: center;
+  }
+  .generate .label {
+    grid-area: 1 / 1;
+  }
+  .label.hidden {
+    visibility: hidden;
+  }
+  .stage-wrap {
+    position: relative;
+    min-width: 0;
+  }
   .loading {
-    color: var(--muted);
-    font-size: 0.85rem;
+    position: absolute;
+    top: 10px;
+    left: 50%;
+    transform: translateX(-50%);
+    white-space: nowrap;
+    pointer-events: none;
+    font-size: 0.8rem;
+    font-weight: 600;
+    color: white;
+    background: rgb(0 0 0 / 55%);
+    padding: 2px 10px;
+    border-radius: 999px;
+    opacity: 0;
+  }
+  .loading.on {
+    /* Only appears if loading takes a moment, so quick updates don't flicker. */
+    animation: show 0.15s 0.3s forwards;
+  }
+  @keyframes show {
+    to {
+      opacity: 1;
+    }
   }
   .stage {
     position: relative;

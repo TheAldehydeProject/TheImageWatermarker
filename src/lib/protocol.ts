@@ -1,4 +1,5 @@
 import type { InputFormat, OutputFormat } from './formats';
+import type { ProcessStep } from './pipeline';
 import type { JobSpec } from './settings';
 
 /** Messages from the page to a processing worker. */
@@ -31,6 +32,7 @@ export interface PreviewImage {
 
 /** Messages from a worker back to the page. */
 export type WorkerResponse =
+  | { type: 'progress'; id: number; step: ProcessStep; attempt?: number }
   | { type: 'process-done'; id: number; file: ProcessedFile }
   | { type: 'preview-done'; id: number; preview: PreviewImage }
   | { type: 'error'; id: number; message: string };

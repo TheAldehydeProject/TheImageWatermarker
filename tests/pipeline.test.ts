@@ -101,7 +101,7 @@ describe('Compress (lossless)', () => {
     const r = await processImage(
       tiny,
       'small.jpg',
-      spec('compress', { compress: { mode: 'visual', quality: 95 } }),
+      spec('compress', { compress: { ...DEFAULT_SETTINGS.compress, mode: 'visual', quality: 95 } }),
       deps,
     );
     expect(r.keptOriginal).toBe(true);
@@ -138,7 +138,7 @@ describe('Compress (visually lossless)', () => {
     const r = await processImage(
       big,
       'b.jpg',
-      spec('compress', { compress: { mode: 'visual', quality: 80 } }),
+      spec('compress', { compress: { ...DEFAULT_SETTINGS.compress, mode: 'visual', quality: 80 } }),
       deps,
     );
     expect(r.keptOriginal).toBe(false);
@@ -151,7 +151,7 @@ describe('Compress (visually lossless)', () => {
     const r = await processImage(
       png,
       'p.png',
-      spec('compress', { compress: { mode: 'visual', quality: 90 } }),
+      spec('compress', { compress: { ...DEFAULT_SETTINGS.compress, mode: 'visual', quality: 90 } }),
       deps,
     );
     expect(uniqueColors(await pixels(r.bytes, 'x.png'))).toBeLessThanOrEqual(256);
@@ -275,4 +275,120 @@ describe('Watermark', () => {
     const r = await processImage(jpg, 'w.jpg', spec('watermark'), deps);
     expect(r).toMatchObject({ format: 'jpeg', lossless: false });
   });
+});
+
+describe('progress reports', () => {
+  const run = async (bytes: Uint8Array, name: string, s: JobSpec) => {
+    const steps: string[] = [];
+    await processImage(bytes, name, s, { ...deps, progress: (step) => steps.push(step) });
+    return steps;
+  };
+
+  it('reports each step as it starts, in order', async () => {
+    const jpg = await encodeJpeg(photoLike(300, 200, 4), { quality: 90 });
+    const s = { ...spec('all'), resize: { maxWidth: 150, maxHeight: 150 } };
+    expect(await run(jpg, 'p.jpg', s)).toEqual([
+      'reading',
+      'resizing',
+      'watermarking',
+      'compressing',
+    ]);
+  });
+
+  it('skips steps that are not needed', async () => {
+    const jpg = await encodeJpeg(photoLike(120, 80, 4), { quality: 90 });
+    // Lossless re-packing of a JPG.
+    expect(await run(jpg, 'p.jpg', spec('compress'))).toEqual(['reading', 'compressing']);
+    // Converting: no resize or watermark.
+    expect(await run(jpg, 'p.jpg', spec('convert'))).toEqual(['reading', 'compressing']);
+  });
+});
+
+describe('Target size', () => {
+  const compressTo = (kb: number): JobSpec =>
+    spec('compress', {
+      compress: { ...DEFAULT_SETTINGS.compress, mode: 'target', target: { value: kb, unit: 'KB' } },
+    });
+
+  it('saves a JPG at the highest quality that fits, keeping its size', async () => {
+    const jpg = await encodeJpeg(photoLike(480, 360, 5), { quality: 97 });
+    const kb = Math.round((jpg.length * 0.4) / 1024);
+    const r = await processImage(jpg, 'p.jpg', compressTo(kb), deps);
+    expect(r.format).toBe('jpeg');
+    expect([r.width, r.height]).toEqual([480, 360]);
+    expect(r.bytes.length).toBeLessThanOrEqual(kb * 1024);
+    // It uses the room it has rather than settling for a much lower quality.
+    expect(r.bytes.length).toBeGreaterThan(kb * 1024 * 0.8);
+    expect(r.notes.join(' ')).toMatch(/Fits under .* at quality \d+\./);
+    const q = Number(/quality (\d+)/.exec(r.notes.join(' '))![1]);
+    // A clearly higher quality would not have fitted.
+    const higher = await processImage(
+      jpg,
+      'p.jpg',
+      spec('compress', {
+        compress: { ...DEFAULT_SETTINGS.compress, mode: 'visual', quality: Math.min(100, q + 3) },
+      }),
+      deps,
+    );
+    expect(q === 100 || higher.bytes.length > kb * 1024).toBe(true);
+  }, 60_000);
+
+  it('makes the image smaller only when even the lowest quality is too big', async () => {
+    const jpg = await encodeJpeg(photoLike(480, 360, 6), { quality: 95 });
+    const r = await processImage(jpg, 'p.jpg', compressTo(3), deps);
+    expect(r.bytes.length).toBeLessThanOrEqual(3 * 1024);
+    expect(r.width).toBeLessThan(480);
+    expect(r.width / r.height).toBeCloseTo(480 / 360, 1);
+    expect(r.notes.join(' ')).toMatch(/resized to \d+ × \d+/);
+  }, 60_000);
+
+  it('never lowers the quality of a file that already fits', async () => {
+    const jpg = await encodeJpeg(photoLike(160, 120, 7), { quality: 80 });
+    const r = await processImage(jpg, 'p.jpg', compressTo(1000), deps);
+    expect(r.bytes.length).toBeLessThanOrEqual(jpg.length);
+    expect(r.lossless).toBe(true);
+    expect(maxChannelDiff(await decodeJpeg(r.bytes), await decodeJpeg(jpg))).toBe(0);
+    expect(r.notes[0]).toMatch(/^Already under 1000 KB/);
+  });
+
+  it('PNG stays lossless if that fits, and otherwise drops to 256 colours', async () => {
+    const { default: encode } = await import('@jsquash/png/encode.js');
+    const png = new Uint8Array(await encode(photoLike(200, 150, 8) as unknown as ImageData));
+    const lossless = await processImage(png, 'x.png', spec('compress'), deps);
+    const reduced = await processImage(
+      png,
+      'x.png',
+      spec('compress', { compress: { ...DEFAULT_SETTINGS.compress, mode: 'visual' } }),
+      deps,
+    );
+    expect(reduced.bytes.length).toBeLessThan(lossless.bytes.length);
+    const between = (lossless.bytes.length + reduced.bytes.length) / 2 / 1024;
+    const r = await processImage(png, 'x.png', compressTo(between), deps);
+    expect(r).toMatchObject({ format: 'png', lossless: false, width: 200 });
+    expect(r.bytes.length).toBeLessThanOrEqual(between * 1024);
+    expect(r.notes.join(' ')).toMatch(/256 colours/);
+  }, 60_000);
+
+  it('converts, watermarks and fits in one go (All-in-one to AVIF)', async () => {
+    const jpg = await encodeJpeg(photoLike(400, 300, 9), { quality: 95 });
+    const s = spec('all', {
+      all: {
+        ...DEFAULT_SETTINGS.all,
+        format: 'avif',
+        mode: 'target',
+        target: { value: 6, unit: 'KB' },
+      },
+    });
+    const steps: string[] = [];
+    const r = await processImage(jpg, 'p.jpg', s, {
+      ...deps,
+      progress: (step, attempt) => steps.push(attempt ? `${step} ${attempt}` : step),
+    });
+    expect(r.format).toBe('avif');
+    expect(r.bytes.length).toBeLessThanOrEqual(6 * 1024);
+    expect(steps.slice(0, 2)).toEqual(['reading', 'watermarking']);
+    const tries = steps.filter((x) => x.startsWith('fitting'));
+    expect(tries.length).toBeGreaterThan(0);
+    expect(tries).toEqual(tries.map((_, i) => `fitting ${i + 1}`));
+  }, 120_000);
 });

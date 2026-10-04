@@ -2,6 +2,7 @@
   import { app, type FileEntry } from '../lib/app.svelte';
   import { formatBytes, formatChange } from '../lib/filename';
   import { INPUT_FORMAT_LABELS, OUTPUT_FORMATS } from '../lib/formats';
+  import { stepLabel } from '../lib/progress';
 
   const toolLabel = {
     compress: 'Compressed',
@@ -38,7 +39,9 @@
             {#if f.width}· {f.width}×{f.height}{/if}
           </span>
           {#if f.status === 'processing'}
-            <span class="status">Working…</span>
+            <span class="status working" data-testid="file-step"
+              >{stepLabel(f.step ?? 'queued', f.attempt)}</span
+            >
           {:else if f.status === 'error'}
             <span class="status error" data-testid="file-error">{f.error}</span>
           {:else if f.previewError && !f.result}
@@ -48,7 +51,9 @@
               class="status"
               title={`${toolLabel[f.result.tool]}${f.result.keptOriginal ? ' (original kept)' : ''}`}
             >
-              → {OUTPUT_FORMATS[f.result.format].label} · {formatBytes(f.result.size)}
+              <span class="done">Done</span> → {OUTPUT_FORMATS[f.result.format].label} · {formatBytes(
+                f.result.size,
+              )}
               <span class="change {changeClass(f)}" data-testid="size-change"
                 >{formatChange(f.file.size, f.result.size)}</span
               >
@@ -174,6 +179,13 @@
   }
   .status.error {
     color: var(--danger);
+  }
+  .status.working {
+    color: var(--accent-text);
+  }
+  .done {
+    font-weight: 600;
+    color: var(--success);
   }
   .change {
     font-weight: 700;

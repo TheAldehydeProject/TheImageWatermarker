@@ -330,6 +330,258 @@ test('Watermark: Generate preview shows the exact result without exporting', asy
   expect(problems).toEqual([]);
 });
 
+/** Makes every reply from the processing workers arrive late, as on a slow computer. */
+function slowWorkers(delay: number) {
+  const Native = window.Worker;
+  window.Worker = class extends Native {
+    get onmessage() {
+      return super.onmessage;
+    }
+    set onmessage(handler: ((e: MessageEvent) => void) | null) {
+      super.onmessage = handler && ((e) => setTimeout(() => handler.call(this, e), delay));
+    }
+  };
+}
+
+interface LayoutFrame {
+  stageTop: number;
+  stageHeight: number;
+  /** The picture: the live canvas, or the before/after viewer. */
+  picture: { x: number; y: number; w: number; h: number } | null;
+  /** Pixel size of what the picture's canvas currently holds. */
+  pixels: { w: number; h: number } | null;
+}
+
+/** Starts recording where the preview sits on every frame. */
+async function recordLayout(page: Page) {
+  await page.evaluate(() => {
+    const w = window as unknown as { layoutLog: LayoutFrame[]; layoutTimer: number };
+    cancelAnimationFrame(w.layoutTimer);
+    w.layoutLog = [];
+    const frame = () => {
+      const stage = document.querySelector('[data-testid=preview-stage]')!.getBoundingClientRect();
+      const c = document.querySelector<HTMLCanvasElement>(
+        '[data-testid=live-preview], [data-testid=after]',
+      );
+      const r = c?.getBoundingClientRect();
+      w.layoutLog.push({
+        stageTop: stage.top,
+        stageHeight: stage.height,
+        picture: r ? { x: r.x, y: r.y, w: r.width, h: r.height } : null,
+        pixels: c ? { w: c.width, h: c.height } : null,
+      });
+      w.layoutTimer = requestAnimationFrame(frame);
+    };
+    frame();
+  });
+}
+
+async function recordedLayout(page: Page): Promise<LayoutFrame[]> {
+  return page.evaluate(() => (window as unknown as { layoutLog: LayoutFrame[] }).layoutLog);
+}
+
+const near = (a: number, b: number) => Math.abs(a - b) < 0.6;
+const samePlace = (a: LayoutFrame['picture'] | undefined, b: LayoutFrame['picture'] | undefined) =>
+  !!a && !!b && near(a.x, b.x) && near(a.y, b.y) && near(a.w, b.w) && near(a.h, b.h);
+
+test('Watermark preview stays put while settings change and while it loads', async ({ page }) => {
+  const problems = watch(page);
+  // Wide enough for the preview toolbar to fit on one line, where anything
+  // appearing in it would push the picture down.
+  await page.setViewportSize({ width: 1920, height: 1080 });
+  await page.addInitScript(slowWorkers, 400);
+  await page.reload();
+  await page.getByRole('tab', { name: 'Watermark' }).click();
+  await page.getByTestId('file-input').setInputFiles(join(FIXTURE_DIR, 'camera.jpg'));
+  const canvas = page.getByTestId('live-preview');
+  await expect.poll(() => canvas.evaluate((c: HTMLCanvasElement) => c.width)).toBe(640);
+  await page.waitForTimeout(500);
+  await recordLayout(page);
+  const [start] = await recordedLayout(page);
+  expect(start.pixels).toEqual({ w: 640, h: 480 });
+  const fit = start.picture;
+
+  // Dragging sliders in Fit view.
+  for (const id of ['wm-size', 'wm-opacity', 'wm-margin']) {
+    const box = (await page.locator(`#${id}`).boundingBox())!;
+    const y = box.y + box.height / 2;
+    await page.mouse.move(box.x + box.width * 0.2, y);
+    await page.mouse.down();
+    for (let i = 1; i <= 10; i++) await page.mouse.move(box.x + box.width * (0.2 + i * 0.06), y);
+    await page.mouse.up();
+  }
+  await page.waitForTimeout(300);
+  let frames = await recordedLayout(page);
+  expect(frames.length).toBeGreaterThan(5);
+  for (const f of frames) {
+    expect(f.stageTop).toBeCloseTo(start.stageTop, 0);
+    expect(f.stageHeight).toBeCloseTo(start.stageHeight, 0);
+    expect(samePlace(f.picture, fit)).toBe(true);
+  }
+
+  // Close-up takes a moment to load. Until it is ready, the picture keeps its
+  // size and shape, and the loading notice doesn't push anything around.
+  await recordLayout(page);
+  await page.getByRole('button', { name: 'Close-up' }).click();
+  await expect.poll(() => canvas.evaluate((c: HTMLCanvasElement) => c.width)).toBeLessThan(640);
+  frames = await recordedLayout(page);
+  const waiting = frames.filter((f) => f.pixels?.w === 640);
+  expect(waiting.length).toBeGreaterThan(3);
+  for (const f of waiting) expect(samePlace(f.picture, fit)).toBe(true);
+  for (const f of frames) expect(f.stageTop).toBeCloseTo(start.stageTop, 0);
+  await page.getByRole('button', { name: 'Fit' }).click();
+  await expect.poll(() => canvas.evaluate((c: HTMLCanvasElement) => c.width)).toBe(640);
+
+  // Generating a preview (first time, and again after a change) keeps the
+  // picture where it is and the same size.
+  for (const blend of ['normal', 'multiply']) {
+    await page.getByTestId('blend-mode').selectOption(blend);
+    await page.getByRole('tab', { name: 'Watermark preview' }).click();
+    await expect.poll(() => canvas.evaluate((c: HTMLCanvasElement) => c.width)).toBe(640);
+    await recordLayout(page);
+    await page.getByTestId('generate-preview').click();
+    await expect(page.getByTestId('draft-info')).toBeVisible();
+    await expect(page.getByTestId('draft-stale')).toHaveCount(0);
+    await expect
+      .poll(() => page.getByTestId('after').evaluate((c: HTMLCanvasElement) => c.width))
+      .toBe(640);
+    await page.waitForTimeout(100);
+    frames = await recordedLayout(page);
+    expect(frames.length).toBeGreaterThan(10);
+    for (const f of frames) {
+      expect(f.stageTop).toBeCloseTo(start.stageTop, 0);
+      expect(f.stageHeight).toBeCloseTo(start.stageHeight, 0);
+      expect(samePlace(f.picture, fit)).toBe(true);
+    }
+  }
+  expect(problems).toEqual([]);
+});
+
+test('shows overall progress and the step each file is on while processing', async ({ page }) => {
+  const problems = watch(page);
+  await page.addInitScript(slowWorkers, 150);
+  await page.reload();
+  await page.getByRole('tab', { name: 'All-in-one' }).click();
+  await addAll(page);
+  // Record the progress bar and the steps shown in the file list on every frame.
+  await page.evaluate(() => {
+    const w = window as unknown as {
+      progressLog: { value: number; text: string; steps: string[] }[];
+    };
+    w.progressLog = [];
+    const frame = () => {
+      const bar = document.querySelector('[data-testid=batch-progress] [role=progressbar]');
+      if (bar) {
+        w.progressLog.push({
+          value: Number(bar.getAttribute('aria-valuenow')),
+          text: document.querySelector('.batch-text')?.textContent?.trim() ?? '',
+          steps: [...document.querySelectorAll('[data-testid=file-step]')].map(
+            (e) => e.textContent?.trim() ?? '',
+          ),
+        });
+      }
+      requestAnimationFrame(frame);
+    };
+    frame();
+  });
+  await processAll(page);
+  await expect(page.getByTestId('batch-progress')).toHaveCount(0);
+
+  const log = await page.evaluate(
+    () =>
+      (window as unknown as { progressLog: { value: number; text: string; steps: string[] }[] })
+        .progressLog,
+  );
+  expect(log.length).toBeGreaterThan(10);
+  const total = FIXTURES.length;
+  for (const entry of log) {
+    expect(entry.text).toMatch(new RegExp(`^\\d+ of ${total} done · \\d+%$`));
+  }
+  // The bar only moves forward, and shows the work in between.
+  const values = log.map((e) => e.value);
+  for (let i = 1; i < values.length; i++) expect(values[i]).toBeGreaterThanOrEqual(values[i - 1]);
+  expect(values.some((v) => v > 0 && v < 100)).toBe(true);
+  // Each file shows the step it is on.
+  const steps = new Set(log.flatMap((e) => e.steps));
+  for (const step of ['Waiting…', 'Reading…', 'Adding the watermark…', 'Compressing…']) {
+    expect(steps).toContain(step);
+  }
+  // Finished files say so.
+  for (const f of FIXTURES) await expect(row(page, f.file)).toContainText('Done');
+  expect(problems).toEqual([]);
+});
+
+/** Reads a size such as "19.6 KB" back into bytes (approximately). */
+function parseSize(text: string): number {
+  const m = /([\d.]+) (B|KB|MB)/.exec(text);
+  if (!m) throw new Error(`no size in "${text}"`);
+  return Number(m[1]) * { B: 1, KB: 1024, MB: 1024 * 1024 }[m[2] as 'B' | 'KB' | 'MB'];
+}
+
+test('Compress to a target size, after checking the exact size with Estimate', async ({ page }) => {
+  const problems = watch(page);
+  await page.getByTestId('file-input').setInputFiles(join(FIXTURE_DIR, 'camera.jpg'));
+  await expect(row(page, 'camera.jpg').locator('img')).toBeVisible();
+  await page.getByRole('radio', { name: 'Target size' }).check({ force: true });
+  await page.getByTestId('target-size').fill('20');
+
+  // The estimate is the exact file, made without saving anything.
+  await page.getByTestId('estimate').click();
+  const estimate = page.getByTestId('estimate-result');
+  await expect(estimate).toContainText('camera.jpg');
+  await expect(estimate).toContainText('as JPG, 640×480');
+  const text = (await estimate.textContent())!;
+  const estimated = parseSize(text.split('→')[1]);
+  expect(estimated).toBeLessThanOrEqual(20 * 1024);
+  await expect(page.locator('.estimate .notes')).toContainText(/Fits under 20.0 KB at quality \d+/);
+  await expect(row(page, 'camera.jpg')).toHaveAttribute('data-status', 'idle');
+
+  // Changing the target makes it out of date; changing it back makes it current again.
+  await page.getByTestId('target-size').fill('15');
+  await expect(page.getByTestId('estimate-stale')).toBeVisible();
+  await page.getByTestId('target-size').fill('20');
+  await expect(page.getByTestId('estimate-stale')).toHaveCount(0);
+
+  // Processing saves exactly that file.
+  await page.getByTestId('process').click();
+  await expect(row(page, 'camera.jpg')).toHaveAttribute('data-status', 'done');
+  const out = await download(page, 'camera.jpg');
+  expect(out.name).toBe('camera-compressed.jpg');
+  expect(out.bytes.length).toBeLessThanOrEqual(20 * 1024);
+  expect(Math.abs(out.bytes.length - estimated)).toBeLessThan(60);
+  const img = await decodeFile(out.bytes, out.name);
+  expect([img.width, img.height]).toEqual([640, 480]);
+
+  // A tiny target is reached by also making the image smaller.
+  await page.getByTestId('target-size').fill('3');
+  await page.getByTestId('process').click();
+  await expect(row(page, 'camera.jpg')).toContainText(/Done → JPG · [\d.]+ KB/);
+  const small = await download(page, 'camera.jpg');
+  expect(small.bytes.length).toBeLessThanOrEqual(3 * 1024);
+  const shrunk = await decodeFile(small.bytes, small.name);
+  expect(shrunk.width).toBeLessThan(640);
+  await expect(page.getByTestId('result-info')).toBeVisible();
+  await expect(page.locator('.preview .notes')).toContainText('resized to');
+  expect(problems).toEqual([]);
+});
+
+test('All-in-one: watermark and convert to AVIF within a target size (in MB)', async ({ page }) => {
+  const problems = watch(page);
+  await page.getByRole('tab', { name: 'All-in-one' }).click();
+  await page.getByTestId('file-input').setInputFiles(join(FIXTURE_DIR, 'graphic.png'));
+  await expect(row(page, 'graphic.png').locator('img')).toBeVisible();
+  await page.locator('input[name=all-format][value=avif]').check({ force: true });
+  await page.getByRole('radio', { name: 'Target size' }).check({ force: true });
+  await page.getByTestId('target-unit').selectOption('MB');
+  await page.getByTestId('target-size').fill('0.01');
+  await page.getByTestId('process').click();
+  await expect(row(page, 'graphic.png')).toHaveAttribute('data-status', 'done');
+  const out = await download(page, 'graphic.png');
+  expect(out.name).toBe('graphic-edited.avif');
+  expect(out.bytes.length).toBeLessThanOrEqual(0.01 * 1024 * 1024);
+  expect(problems).toEqual([]);
+});
+
 test('All-in-one produces a ZIP with every result', async ({ page }) => {
   const problems = watch(page);
   await page.getByRole('tab', { name: 'All-in-one' }).click();

@@ -5,12 +5,12 @@ browser, so images are never uploaded anywhere.
 
 ## What it does
 
-| Tool           | What it does                                                                                                                                                                     |
-| -------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Compress**   | Makes files smaller and keeps their format. **Lossless** (default): every pixel stays identical. **Visually lossless**: re-saves at a high quality. Never returns a bigger file. |
-| **Convert**    | Saves as WebP (default, lossless), JPEG XL, AVIF, PNG, JPG or TIFF.                                                                                                              |
-| **Watermark**  | Adds a small formaldehyde molecule (H₂C=O) to a corner of each image.                                                                                                            |
-| **All-in-one** | Watermark, convert and compress in one pass.                                                                                                                                     |
+| Tool           | What it does                                                                                                                                                                                                                       |
+| -------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Compress**   | Makes files smaller and keeps their format. **Lossless** (default): every pixel stays identical. **Visually lossless**: re-saves at a high quality. **Target size**: aims for a file size you choose. Never returns a bigger file. |
+| **Convert**    | Saves as WebP (default, lossless), JPEG XL, AVIF, PNG, JPG or TIFF.                                                                                                                                                                |
+| **Watermark**  | Adds a small formaldehyde molecule (H₂C=O) to a corner of each image.                                                                                                                                                              |
+| **All-in-one** | Watermark, convert and compress in one pass.                                                                                                                                                                                       |
 
 **Reads:** JPG, PNG, WebP, RAW (CR2, CR3, NEF, ARW, DNG, RAF, ORF, RW2, PEF, SRW and more), HEIC/HEIF,
 AVIF, JPEG XL, TIFF, GIF and BMP.
@@ -18,6 +18,17 @@ AVIF, JPEG XL, TIFF, GIF and BMP.
 **Workflow extras:**
 
 - Batch processing, with a "Download all" ZIP.
+- A progress bar for the whole batch, and each file shows the step it is on (waiting, reading,
+  adding the watermark, compressing, done).
+- **Target size** (Compress and All-in-one): type a size such as 300 KB. Each image is saved at the
+  highest quality that fits:
+  - If even the lowest quality allowed is too big, the image is also made smaller, keeping as many
+    pixels as fit. The lowest quality looks about the same in every format: JPG and WebP 50, JPEG XL
+    54, AVIF 62. These were measured on real photos (see below).
+  - PNG stays lossless if that fits, and otherwise drops to 256 colours. TIFF can only be resized.
+  - Files already under the target are kept as they are, apart from lossless clean-up.
+- **Estimate size**: makes the exact file for the selected image, without saving it, and shows its
+  size. Processing then reuses it if the settings haven't changed.
 - Drag and drop, or paste images.
 - Live watermark preview, plus a full-resolution close-up of the watermark.
 - **Generate preview** (Watermark tab): makes the exact watermarked file for the selected image and
@@ -64,6 +75,29 @@ AVIF, JPEG XL, TIFF, GIF and BMP.
   - **Lossless** re-packs the JPG's coding, the same thing `jpegtran -optimize` does, with identical
     pixels.
   - **Visually lossless** re-saves it at a high quality.
+
+### Getting photos from megabytes to kilobytes
+
+**All-in-one → AVIF → Target size** is the most effective setting. It was measured on five real
+photos (440 encodes), with every result scored by [SSIMULACRA2](https://github.com/cloudinary/ssimulacra2),
+a measure of how different an image looks to a person. The table shows the size each format needs
+for the same visual quality, compared with JPG (MozJPEG, as the site uses it):
+
+| Format          | High quality (score 70) | Very high quality (score 80) | Time to encode, per megapixel |
+| --------------- | ----------------------- | ---------------------------- | ----------------------------- |
+| **AVIF**        | **−30%**                | **−32%**                     | about 1.6 s                   |
+| JPEG XL         | −20%                    | −27%                         | about 1.6 s                   |
+| WebP            | −7%                     | −9%                          | about 0.1 s                   |
+| JPG (reference) | —                       | —                            | about 0.2 s                   |
+
+- Slower AVIF settings save another 5–6%, but take nine times as long, so the site doesn't use them.
+- Other AVIF options (SSIM tuning, sharp colour conversion, full-resolution colour) made no
+  difference worth having.
+- Example: a 4.1 MB, 2268 × 1512 photo fits in 150 KB as AVIF at quality 74, at full size. As JPG it
+  has to be resized to 1813 × 1209 at quality 50 to reach the same size.
+- AVIF takes longest. Each try takes about 1.5 s per megapixel, and a target size usually needs 2–4
+  tries, so a 12-megapixel photo takes roughly 35–70 seconds. Several images are processed at once,
+  and the progress bar shows each try.
 
 Measured on a 1600 × 1200 test image (synthetic, so treat these as indicative):
 
@@ -127,6 +161,8 @@ src/
   lib/            processing logic (no UI)
     pipeline.ts     decode → resize → watermark → encode, per tool
     codecs.ts       loads the WebAssembly codecs on demand
+    fitSize.ts      search for the best quality (and size) under a target file size
+    progress.ts     batch progress and the step each file is on
     jpegOptimize.ts lossless JPEG re-packing
     blend.ts        the 36 blend modes and compositing
     molecule.ts     formaldehyde geometry (layouts, custom letters)
