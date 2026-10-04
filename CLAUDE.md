@@ -25,6 +25,7 @@ Stop and ask **before acting** whenever:
 **How to ask:**
 - Number each question and batch them in one message.
 - For each one, say what you would do by default and why, so I can just reply "yes" or pick an option.
+- Ask them as multiple-choice windows (the question dialog) rather than plain text whenever that's available, with the recommended option first.
 - Then **wait**. Don't proceed on assumptions.
 
 ## 3. Before starting any task
