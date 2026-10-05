@@ -86,6 +86,20 @@ test('loads cleanly with the four tools', async ({ page }) => {
   expect(problems).toEqual([]);
 });
 
+test('uses the plus-sign favicon, and the old molecule icon is gone', async ({ page, request }) => {
+  const href = await page.locator('link[rel=icon]').getAttribute('href');
+  expect(href).toBe('./favicon-plus.svg');
+  const icon = await request.get(new URL(href!, page.url()).href);
+  expect(icon.status()).toBe(200);
+  expect(icon.headers()['content-type']).toContain('image/svg+xml');
+  const svg = await icon.text();
+  expect(svg).toContain('M8 2.5v11M2.5 8h11');
+  expect(svg).not.toContain('<text');
+  // The old file is no longer part of the site.
+  const old = await request.get(new URL('./favicon.svg', page.url()).href);
+  expect(old.headers()['content-type'] ?? '').not.toContain('image/svg+xml');
+});
+
 test('reads every supported format, with EXIF rotation, and rejects other files', async ({
   page,
 }) => {
