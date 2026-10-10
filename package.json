@@ -2,7 +2,7 @@
   "name": "the-image-watermarker",
   "private": true,
   "version": "0.1.0",
-  "description": "Compress, convert and watermark images entirely in your browser.",
+  "description": "Compress, convert and watermark images entirely in your browser, with three separate tools.",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -13,7 +13,16 @@
     "lint": "eslint .",
     "typecheck": "svelte-check --tsconfig ./tsconfig.json --fail-on-warnings",
     "test": "vitest run",
+    "test:shared": "vitest run tests/engine tests/ui",
+    "test:compress": "vitest run tests/compress",
+    "test:convert": "vitest run tests/convert",
+    "test:watermark": "vitest run tests/watermark",
     "test:e2e": "playwright test",
+    "test:e2e:home": "playwright test e2e/home.spec.ts",
+    "test:e2e:compress": "playwright test e2e/compress.spec.ts",
+    "test:e2e:convert": "playwright test e2e/convert.spec.ts",
+    "test:e2e:watermark": "playwright test e2e/watermark.spec.ts",
+    "test:e2e:mobile": "playwright test e2e/mobile.spec.ts",
     "audit": "npm audit"
   },
   "dependencies": {

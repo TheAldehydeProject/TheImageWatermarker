@@ -1,6 +1,6 @@
 import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
-import { createImage, type RGBAImage } from '../src/lib/image';
+import { createImage, type RGBAImage } from '../src/engine/image';
 
 /** Minimal ImageData for Node, which the WebAssembly codecs construct. */
 class NodeImageData {

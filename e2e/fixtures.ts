@@ -5,9 +5,9 @@
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import * as gifencModule from 'gifenc';
-import type { RGBAImage } from '../src/lib/image';
-import { injectJpegMetadata, orientationOnlyExif } from '../src/lib/metadata';
-import { encodeTiff } from '../src/lib/tiff';
+import type { RGBAImage } from '../src/engine/image';
+import { injectJpegMetadata, orientationOnlyExif } from '../src/engine/metadata';
+import { encodeTiff } from '../src/engine/tiff';
 import { asImageData, encodeJpeg, initCodecs, photoLike } from '../tests/helpers';
 import { rewriteJpeg } from '../tests/jpegRewrite';
 

@@ -24,6 +24,15 @@ export default defineConfig({
   build: {
     target: 'es2022',
     chunkSizeWarningLimit: 4096,
+    // A start page and one separate page per tool.
+    rollupOptions: {
+      input: {
+        home: 'index.html',
+        compress: 'compress/index.html',
+        convert: 'convert/index.html',
+        watermark: 'watermark/index.html',
+      },
+    },
   },
   test: {
     include: ['tests/**/*.test.ts'],

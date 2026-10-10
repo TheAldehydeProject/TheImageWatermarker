@@ -8,6 +8,7 @@ permissions:
   contents: read
 
 jobs:
+  # Checks that cover the whole site.
   check:
     runs-on: ubuntu-latest
     steps:
@@ -25,18 +26,39 @@ jobs:
         run: npm run typecheck
       - name: Build
         run: npm run build
+      - name: Dependency audit
+        run: npm audit --audit-level=moderate
+
+  # Each part is tested on its own: the shared engine, then each tool's page.
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        part: [shared, compress, convert, watermark]
+    name: test (${{ matrix.part }})
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
       - name: Unit tests
-        run: npm test
+        run: npm run test:${{ matrix.part }}
       - name: Install Chromium for end-to-end tests
         run: npx playwright install --with-deps chromium
       - name: End-to-end tests
-        run: npm run test:e2e
-      - name: Dependency audit
-        run: npm audit --audit-level=moderate
+        run: |
+          if [ "${{ matrix.part }}" = shared ]; then
+            npm run test:e2e:home && npm run test:e2e:mobile
+          else
+            npm run test:e2e:${{ matrix.part }}
+          fi
       - uses: actions/upload-artifact@v4
         if: failure()
         with:
-          name: playwright-report
+          name: playwright-report-${{ matrix.part }}
           path: |
             playwright-report/
             test-results/
